@@ -1,0 +1,47 @@
+# ===============================
+# Python
+# ===============================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# ===============================
+# Packaging / build
+# ===============================
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ===============================
+# VS Code / IDE
+# ===============================
+.vscode/
+.idea/
+
+# ===============================
+# OS files
+# ===============================
+.DS_Store
+Thumbs.db
+
+# ===============================
+# Logs & outputs (generated)
+# ===============================
+outputs/
+logs/
+processed/
+raw/
+reports/
+
+# ===============================
+# CloudMapper artifacts (generated)
+# ===============================
+web/
+data/
+account-data/
