@@ -1,8 +1,16 @@
+# Importations ------------------------------------------------------------
 import pandas as pd
 from typing import Dict, Any, List
 
-
+# Helper to extract selected columns from items ---------------------------
 def _rows(items: List[Dict[str, Any]], cols: List[str]) -> List[Dict[str, Any]]:
+    """
+    Extracts a subset of keys from a list of dictionaries.
+
+    :param items: List of dictionaries (AWS resources)
+    :param cols: List of keys to extract
+    :return: List of dictionaries with selected keys only
+    """
     out = []
     for it in items or []:
         row = {}
@@ -11,15 +19,22 @@ def _rows(items: List[Dict[str, Any]], cols: List[str]) -> List[Dict[str, Any]]:
         out.append(row)
     return out
 
-
+# Excel report builder -------------------------------------------------
 def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
     """
-    inventory: dict que devuelve collect_inventory() en inventory.py
-    out_xlsx_path: ruta final del excel
+    Builds an Excel report from the AWS inventory structure.
+
+    The inventory dictionary is expected to be the output of
+    collect_inventory() from inventory.py.
+
+    :param inventory: Aggregated AWS inventory data
+    :param out_xlsx_path: Final path where the Excel file will be written
     """
+    
+    # Inventory items grouped by region ---------------------------------
     items = inventory.get("items", [])
 
-    # Acumuladores globales (todas las regiones)
+    # Global accumulators (all regions combined) ------------------------
     vpcs_all = []
     subnets_all = []
     rts_all = []
@@ -27,10 +42,11 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
     ec2_all = []
     lbs_all = []
 
+    # Iterate through each region block --------------------------------
     for region_block in items:
         region = region_block.get("region")
 
-        # VPCs
+        # VPCs ---------------------------------------------------------
         for v in region_block.get("vpcs", []):
             vpcs_all.append({
                 "Region": region,
@@ -40,7 +56,7 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
                 "State": v.get("State"),
             })
 
-        # Subnets
+        # Subnets ------------------------------------------------------
         for s in region_block.get("subnets", []):
             subnets_all.append({
                 "Region": region,
@@ -51,9 +67,9 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
                 "State": s.get("State"),
             })
 
-        # Route tables
+        # Route tables ------------------------------------------------
         for rt in region_block.get("route_tables", []):
-            # Sacar el vpcId si viene
+            # Get the vpcId if it is provided
             rts_all.append({
                 "Region": region,
                 "RouteTableId": rt.get("RouteTableId"),
@@ -62,7 +78,7 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
                 "Routes": len(rt.get("Routes", []) or []),
             })
 
-        # Security Groups
+        # Security Groups----------------------------------------------
         for sg in region_block.get("security_groups", []):
             sgs_all.append({
                 "Region": region,
@@ -74,9 +90,9 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
                 "Description": sg.get("Description"),
             })
 
-        # EC2 instances
+        # EC2 instances ------------------------------------------------
         for ins in region_block.get("instances", []):
-            # Nombre de tag (si existe)
+            # Extract Name tag if present
             name = ""
             for t in ins.get("Tags", []) or []:
                 if t.get("Key") == "Name":
@@ -95,7 +111,7 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
                 "PublicIp": ins.get("PublicIpAddress"),
             })
 
-        # Load balancers (ELBv2)
+        # Load balancers ---------------------------------------------
         for lb in region_block.get("load_balancers", []):
             lbs_all.append({
                 "Region": region,
@@ -108,7 +124,7 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
                 "DNSName": lb.get("DNSName"),
             })
 
-    # Escritura Excel
+    # Write Excel file -----------------------------------------------
     with pd.ExcelWriter(out_xlsx_path, engine="openpyxl") as writer:
         pd.DataFrame(vpcs_all).to_excel(writer, index=False, sheet_name="VPCs")
         pd.DataFrame(subnets_all).to_excel(writer, index=False, sheet_name="Subnets")
@@ -117,7 +133,7 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
         pd.DataFrame(ec2_all).to_excel(writer, index=False, sheet_name="EC2")
         pd.DataFrame(lbs_all).to_excel(writer, index=False, sheet_name="LoadBalancers")
 
-        # Resumen rápido
+        # Summary sheet ----------------------------------------------
         summary = [{
             "VPCs": len(vpcs_all),
             "Subnets": len(subnets_all),
