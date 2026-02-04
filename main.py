@@ -1,7 +1,6 @@
 import argparse
-from .config import Settings
-from .runner import run_all
-
+from config import Settings
+from runner import run_all
 
 def main():
     parser = argparse.ArgumentParser(prog="aws-audit-tool")

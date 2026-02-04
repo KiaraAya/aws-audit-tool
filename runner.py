@@ -4,11 +4,11 @@ from datetime import datetime, timezone
 
 import boto3
 
-from .config import Settings
-from .inventory import collect_inventory
-from .s3_io import upload_file
-from .cloudmapper_job import run_cloudmapper
-from .excel_report import build_excel
+from config import Settings
+from inventory import collect_inventory
+from s3_io import upload_file
+from cloudmapper_job import run_cloudmapper
+from excel_report import build_excel
 
 
 def ensure_dirs(path: str):
@@ -65,11 +65,11 @@ def run_all(settings: Settings) -> str:
     # ─────────────────────────────────────────────
     # 4) CloudMapper (diagramas)
     # ─────────────────────────────────────────────
-    run_cloudmapper(
+    '''run_cloudmapper(
         cloudmapper_dir=settings.cloudmapper_dir,
         account_name=settings.account_name,
         regions=settings.regions,
-    )
+    )'''
 
     # ─────────────────────────────────────────────
     # 5) Upload a S3 (opcional)
