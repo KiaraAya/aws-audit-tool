@@ -1,101 +1,128 @@
-# Importations ------------------------------------------------------------
+# runner.py
+"""
+Execution orchestrator for aws-audit-tool.
+
+Flow:
+1) Validate identity (STS)
+2) Collect inventory (global + per region)
+3) Write inventory.json + sts_identity.json
+4) Generate Excel report
+5) Optional: CloudMapper
+6) Optional: Upload all outputs to S3
+"""
+
+from __future__ import annotations
+
 import json
 import os
 from datetime import datetime, timezone
+import logging
+
 import boto3
+
 from config import Settings
 from inventory import collect_inventory
-from s3_io import upload_file
-from cloudmapper_job import run_cloudmapper
 from excel_report import build_excel
+from cloudmapper_job import run_cloudmapper
+from s3_io import upload_tree
 
-# Ensure directory exists ------------------------------------------------
-def ensure_dirs(path: str):
-    """
-    Creates a directory if it does not already exist.
+logger = logging.getLogger(__name__)
 
-    :param path: Directory path to create
-    """
+
+def ensure_dirs(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
-# Validate AWS identity ------------------------------------------------
-def get_identity() -> dict:
-    """
-    Validates that boto3 is using the IAM Role attached
-    to the EC2 instance (no access keys required).
 
-    :return: AWS STS caller identity
-    """
+def get_identity() -> dict:
     sts = boto3.client("sts")
     return sts.get_caller_identity()
 
-# Main execution orchestrator ------------------------------------------
+
+def _write_json(path: str, obj: object) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, default=str)
+
+
 def run_all(settings: Settings) -> str:
-    """
-    Orchestrates the complete audit workflow:
+    from cloudmapper_job import run_cloudmapper, start_cloudmapper_webserver, export_cloudmapper_html
 
-    1) Validate AWS identity (IAM Role)
-    2) Collect AWS inventory (JSON)
-    3) Generate Excel report
-    4) Run CloudMapper (infrastructure diagrams)
-    5) Upload outputs to S3 (optional)
-
-    :param settings: Application configuration object
-    :return: Path to the execution output directory
-    """
-    
-    # Ensure base output directory exists -----------------------------
     ensure_dirs(settings.output_dir)
 
-    # 1) Validate IAM Role identity -----------------------------------
     identity = get_identity()
-
-    # Create a timestamped execution directory ------------------------
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
     run_dir = os.path.join(settings.output_dir, ts)
     ensure_dirs(run_dir)
 
-    # Persist STS identity for audit traceability ---------------------
-    identity_path = os.path.join(run_dir, "sts_identity.json")
-    with open(identity_path, "w", encoding="utf-8") as f:
-        json.dump(identity, f, indent=2)
+    logger.info("Run started: %s", ts)
+    _write_json(os.path.join(run_dir, "sts_identity.json"), identity)
 
-    # 2) Collect AWS inventory (JSON) ---------------------------------
     inv = collect_inventory(settings.regions)
+    inv["run_info"] = {
+        "timestamp_utc": ts,
+        "regions": settings.regions,
+        "account_name": settings.account_name,
+        "account_id_env": settings.account_id,
+        "sts_identity": identity,
+    }
 
-    inv_path = os.path.join(run_dir, "inventory.json")
-    with open(inv_path, "w", encoding="utf-8") as f:
-        json.dump(inv, f, indent=2, default=str)
+    _write_json(os.path.join(run_dir, "inventory.json"), inv)
 
-    # 3) Generate Excel report ----------------------------------------
     excel_path = os.path.join(run_dir, "audit_report.xlsx")
     build_excel(inv, excel_path)
 
-    # 4) CloudMapper (diagram generation) -----------------------------
-    '''run_cloudmapper(
-        cloudmapper_dir=settings.cloudmapper_dir,
-        account_name=settings.account_name,
-        regions=settings.regions,
-    )'''
+    findings_path = os.path.join(run_dir, "findings_summary.json")
+    _write_json(findings_path, {
+        "run_info": inv.get("run_info", {}),
+        "global_counts": {
+            "s3_buckets": len(inv.get("global", {}).get("s3_buckets", []) or []),
+            "iam_users": len(inv.get("global", {}).get("iam_users", []) or []),
+        },
+    })
 
-    # 5) Upload a S3 (opcional) ---------------------------------------
+    # 4) CloudMapper (optional)
+    web_proc = None
+    if settings.run_cloudmapper:
+        try:
+            run_cloudmapper(
+                cloudmapper_dir=settings.cloudmapper_dir,
+                account_name=settings.account_name,
+                regions=settings.regions,
+            )
+
+            # Export HTML snapshot (optional)
+            if getattr(settings, "cloudmapper_export_html", True):
+                export_cloudmapper_html(
+                    cloudmapper_dir=settings.cloudmapper_dir,
+                    account_name=settings.account_name,
+                    out_dir=run_dir,  # lo guardamos junto al Excel/JSON
+                )
+
+            # Start webserver (optional)
+            web_proc = start_cloudmapper_webserver(
+                cloudmapper_dir=settings.cloudmapper_dir,
+                account_name=settings.account_name,
+                bind=settings.cloudmapper_bind,
+                port=settings.cloudmapper_port,
+            )
+
+        except Exception as e:
+            logger.warning("CloudMapper failed (non-blocking): %s", e)
+
+
     if settings.s3_bucket:
         prefix = f"{settings.s3_prefix}/{ts}"
+        upload_tree(settings.s3_bucket, prefix, run_dir)
 
-        upload_file(
-            settings.s3_bucket,
-            f"{prefix}/sts_identity.json",
-            identity_path,
-        )
-        upload_file(
-            settings.s3_bucket,
-            f"{prefix}/inventory.json",
-            inv_path,
-        )
-        upload_file(
-            settings.s3_bucket,
-            f"{prefix}/audit_report.xlsx",
-            excel_path,
-        )
+    # Upload to S3 
+    if settings.s3_bucket:
+        prefix = f"{settings.s3_prefix}/{ts}"
+        upload_tree(settings.s3_bucket, prefix, run_dir)
+
+    logger.info("Run completed: outputs=%s", run_dir)
+    
+    if web_proc:
+        logger.info("CloudMapper webserver running (PID=%s). Stop it manually if needed.", web_proc.pid)
 
     return run_dir
+
