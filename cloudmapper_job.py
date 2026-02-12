@@ -1,26 +1,31 @@
-# cloudmapper_job.py
 """
 CloudMapper runner.
 
 Runs:
 - collect
 - prepare
-Optionally:
-- start webserver
-- export an HTML snapshot
+- package full web UI as ZIP (offline site)
+- optional webserver
 """
 
 from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
 import socket
+import shutil
+from pathlib import Path
 from typing import List, Optional
 import logging
 
 logger = logging.getLogger(__name__)
 
+
+# ----------------------------------------------------------------------
+# Internal helpers
+# ----------------------------------------------------------------------
 
 def _run(cmd: list[str], cwd: str) -> str:
     p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
@@ -49,12 +54,22 @@ def _find_free_port(host: str, start_port: int, tries: int = 20) -> int:
     raise RuntimeError(f"No free port found starting at {start_port}")
 
 
+# ----------------------------------------------------------------------
+# Main CloudMapper execution
+# ----------------------------------------------------------------------
+
 def run_cloudmapper(
     cloudmapper_dir: str,
     account_name: str,
     regions: List[str],
     prepare_flags: Optional[List[str]] = None,
 ) -> None:
+    """
+    Runs:
+    - collect
+    - prepare
+    """
+
     prepare_flags = prepare_flags or [
         "--no-internal-edges",
         "--no-inter-rds-edges",
@@ -70,57 +85,131 @@ def run_cloudmapper(
     region_arg = ",".join(regions)
 
     logger.info("CloudMapper collect: %s (%s)", account_name, region_arg)
-    _run(["python", "cloudmapper.py", "collect", "--account", account_name, "--regions", region_arg], cwd=cloudmapper_dir)
+    _run(
+        [
+            sys.executable,
+            "cloudmapper.py",
+            "collect",
+            "--account",
+            account_name,
+            "--regions",
+            region_arg,
+        ],
+        cwd=cloudmapper_dir,
+    )
 
     logger.info("CloudMapper prepare: %s", account_name)
-    _run(["python", "cloudmapper.py", "prepare", "--account", account_name, *prepare_flags], cwd=cloudmapper_dir)
+    _run(
+        [
+            sys.executable,
+            "cloudmapper.py",
+            "prepare",
+            "--account",
+            account_name,
+            *prepare_flags,
+        ],
+        cwd=cloudmapper_dir,
+    )
 
 
-def export_cloudmapper_html(
+# ----------------------------------------------------------------------
+# ZIP packaging (offline HTML site)
+# ----------------------------------------------------------------------
+
+def package_cloudmapper_site_zip(
     cloudmapper_dir: str,
     account_name: str,
     out_dir: str,
 ) -> str:
     """
-    Creates a self-contained HTML export (snapshot) for the account diagrams.
-
-    CloudMapper has an `export` command in most installs. If your CloudMapper
-    fork/version doesn't have it, tell me what `python cloudmapper.py -h` shows
-    and I adapt it.
+    Packages CloudMapper web UI + account data into a ZIP.
+    This produces an offline site you can open locally.
     """
-    os.makedirs(out_dir, exist_ok=True)
-    out_html = os.path.join(out_dir, f"cloudmapper_{account_name}.html")
 
-    # Common command in CloudMapper versions:
-    # python cloudmapper.py export --account <name> --output <file>
-    logger.info("CloudMapper export html -> %s", out_html)
-    _run(["python", "cloudmapper.py", "export", "--account", account_name, "--output", out_html], cwd=cloudmapper_dir)
-    return out_html
+    cm_dir = Path(cloudmapper_dir)
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
 
+    web_src = cm_dir / "web"
+    data_src = cm_dir / "account-data" / account_name
+
+    if not web_src.exists():
+        raise FileNotFoundError(f"CloudMapper web/ not found at {web_src}")
+
+    if not data_src.exists():
+        raise FileNotFoundError(
+            f"CloudMapper account data not found at {data_src}"
+        )
+
+    # Build temporary site folder
+    site_root = out_path / f"cloudmapper_site_{account_name}"
+
+    if site_root.exists():
+        shutil.rmtree(site_root)
+
+    site_root.mkdir()
+
+    # Copy web UI
+    shutil.copytree(web_src, site_root / "web")
+
+    # Copy ONLY this account data
+    shutil.copytree(
+        data_src,
+        site_root / "account-data" / account_name,
+        dirs_exist_ok=True,
+    )
+
+    # Create ZIP
+    zip_base = out_path / f"cloudmapper_{account_name}"
+    zip_file = shutil.make_archive(str(zip_base), "zip", root_dir=str(site_root))
+
+    logger.info("CloudMapper site ZIP created: %s", zip_file)
+    return zip_file
+
+
+# ----------------------------------------------------------------------
+# Optional webserver
+# ----------------------------------------------------------------------
 
 def start_cloudmapper_webserver(
     cloudmapper_dir: str,
-    account_name: str,
-    bind: str = "127.0.0.1",
     port: int = 8000,
+    public: bool = False,
+    ipv6: bool = False,
 ) -> subprocess.Popen:
     """
-    Starts CloudMapper webserver as a subprocess (non-blocking).
-    Returns the Popen handle so caller can keep it alive or terminate it.
+    Starts CloudMapper webserver (non-blocking).
+    Compatible with versions that support:
+    --port
+    --public
+    --ipv6
     """
-    port = _find_free_port(bind, port)
 
-    logger.info("Starting CloudMapper webserver: http://%s:%s", bind, port)
-    # webserver usually does NOT require --account; it serves files under web/
-    # but leaving account_name here doesn't hurt if your version supports it.
+    port = _find_free_port("127.0.0.1", port)
+
+    cmd = [
+        sys.executable,
+        "cloudmapper.py",
+        "webserver",
+        "--port",
+        str(port),
+    ]
+
+    if public:
+        cmd.append("--public")
+
+    if ipv6:
+        cmd.append("--ipv6")
+
+    logger.info("Starting CloudMapper webserver on port %s", port)
+
     p = subprocess.Popen(
-        ["python", "cloudmapper.py", "webserver", "--bind", bind, "--port", str(port)],
+        cmd,
         cwd=cloudmapper_dir,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
 
-    # Give it a moment to boot
     time.sleep(1.0)
     return p
