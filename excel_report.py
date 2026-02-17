@@ -1,32 +1,29 @@
+# ---------------------------------------------------------
 # excel_report.py
-"""
-Excel reporting for aws-audit-tool.
-
-Builds a multi-sheet Excel file with:
-- Resource sheets (VPCs, Subnets, EC2, ...)
-- Added services (EBS, RDS, ASG, DynamoDB, S3, IAM)
-- Findings sheets (Security, Tags, Unused, RDS Risk, Network Overview, IAM Audit)
-- Clean table formatting (filters, freeze header, auto-width)
-"""
+# Excel reporting for aws-audit-tool
+# ---------------------------------------------------------
 
 from __future__ import annotations
 
+# Imports -----------------------------------------------
+
 import re
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
-REQUIRED_TAGS = ["Name", "Environment", "Owner", "CostCenter"]
-RISK_PORTS = {22: "SSH", 3389: "RDP", 3306: "MySQL", 5432: "PostgreSQL"}
+# Constants ---------------------------------------------
+
 EXCEL_TABLE_STYLE = "TableStyleMedium18"
 
+# Data Sanitization -------------------------------------
 
+# Excel doesn't handle timezone-aware datetimes, so we need to strip tzinfo before writing to Excel
 def sanitize_for_excel(obj: Any) -> Any:
-    """Recursively remove timezone info from tz-aware datetimes for Excel compatibility."""
     if isinstance(obj, datetime) and obj.tzinfo is not None:
         return obj.replace(tzinfo=None)
     if isinstance(obj, dict):
@@ -36,6 +33,9 @@ def sanitize_for_excel(obj: Any) -> Any:
     return obj
 
 
+# Internal Helpers --------------------------------------
+
+# Convert list of AWS tags (dicts with "Key" and "Value") into a simple dict for easier access
 def _tags_dict(tags_list) -> Dict[str, str]:
     out: Dict[str, str] = {}
     for t in tags_list or []:
@@ -45,21 +45,17 @@ def _tags_dict(tags_list) -> Dict[str, str]:
             out[k] = v or ""
     return out
 
-
-def _is_world_open(ip_ranges) -> bool:
-    for r in ip_ranges or []:
-        if r.get("CidrIp") == "0.0.0.0/0":
-            return True
-    return False
-
-
+# Excel table names must start with a letter or underscore, and can only contain letters, numbers, and underscores. 
+# This function converts arbitrary sheet names into safe table names.
 def _safe_table_name(name: str) -> str:
     n = re.sub(r"[^A-Za-z0-9_]", "_", name or "Sheet")
     if not re.match(r"^[A-Za-z_]", n):
         n = "_" + n
     return n[:250]
 
+# Worksheet Formatting ----------------------------------
 
+# Format the given worksheet as an Excel table, and auto-size columns. This makes the data look nicer and more readable in Excel.
 def format_sheet_as_table(ws, table_style: str = EXCEL_TABLE_STYLE) -> None:
     max_row = ws.max_row
     max_col = ws.max_column
@@ -70,6 +66,8 @@ def format_sheet_as_table(ws, table_style: str = EXCEL_TABLE_STYLE) -> None:
     if max_row < 2 or max_col < 1:
         return
 
+    # Excel tables require a reference like "A1:D10". 
+    # We calculate the last column letter based on the max column number, and construct the table reference accordingly
     last_col_letter = get_column_letter(max_col)
     table_ref = f"A1:{last_col_letter}{max_row}"
     table_name = _safe_table_name(f"{ws.title}_Table")
@@ -78,6 +76,8 @@ def format_sheet_as_table(ws, table_style: str = EXCEL_TABLE_STYLE) -> None:
     if table_name in existing:
         table_name = f"{table_name}_1"
 
+    # Create the table with the specified style and add it to the worksheet. 
+    # The style controls the colors and formatting of the table in Excel
     table = Table(displayName=table_name, ref=table_ref)
     table.tableStyleInfo = TableStyleInfo(
         name=table_style,
@@ -88,6 +88,8 @@ def format_sheet_as_table(ws, table_style: str = EXCEL_TABLE_STYLE) -> None:
     )
     ws.add_table(table)
 
+    # Auto-size columns based on the maximum length of the content in each column. We iterate through each column
+    # Check the length of the content in each cell, and set the column width accordingly (with a max width to prevent excessively wide columns)
     for col in ws.columns:
         max_len = 0
         col_letter = col[0].column_letter
@@ -100,26 +102,20 @@ def format_sheet_as_table(ws, table_style: str = EXCEL_TABLE_STYLE) -> None:
                 max_len = len(s)
         ws.column_dimensions[col_letter].width = min(max_len + 2, 45)
 
-
+# Apply formatting to all worksheets in the workbook. 
+# This is called after writing all the data to Excel, to ensure that each sheet is formatted as a table and has auto-sized columns.
 def apply_workbook_formatting(xlsx_path: str) -> None:
     wb = load_workbook(xlsx_path)
     for ws in wb.worksheets:
         format_sheet_as_table(ws, table_style=EXCEL_TABLE_STYLE)
     wb.save(xlsx_path)
 
+# Report Builder ----------------------------------------
 
+# The main function to build the Excel report. It takes the inventory data (as a dictionary) and the output path for the Excel file. 
+# It processes the inventory data, extracts relevant information for each AWS resource type, and organizes it into separate lists of dictionaries (one list per resource type). 
+# Each dictionary in the list represents a row in the Excel sheet, with keys corresponding to column names.
 def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
-    """
-    Build the Excel report.
-
-    Expected structure:
-    {
-      "regions": [...],
-      "global": {"s3_buckets": [...], "iam_users": [...], "account_aliases": [...]},
-      "run_info": {...},
-      "items": [ {"region": "...", ...}, ... ]
-    }
-    """
     items = inventory.get("items", []) or []
     global_block = inventory.get("global", {}) or {}
     run_info = inventory.get("run_info", {}) or {}
@@ -131,14 +127,11 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
     vpcs_all, subnets_all, rts_all, sgs_all, ec2_all, lbs_all = [], [], [], [], [], []
     ebs_vols_all, rds_instances_all, rds_clusters_all, asgs_all, dynamodb_all = [], [], [], [], []
 
-    tag_compliance, security_findings, unused_resources, rds_risk, network_overview = [], [], [], [], []
-
-    route_assoc: dict[tuple[str, str], list[str]] = {}
-    rt_has_igw: dict[tuple[str, str], bool] = {}
-
     for region_block in items:
         region = region_block.get("region")
 
+        # VPCs, Subnets, Route Tables, Security Groups, EC2 Instances, Load Balancers, EBS Volumes, RDS Instances, RDS Clusters, AutoScaling Groups, DynamoDB Tables, etc. 
+        # We extract relevant fields for each resource type and append them to the corresponding list.
         for v in region_block.get("vpcs", []):
             vpcs_all.append({
                 "Region": region,
@@ -159,26 +152,13 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
             })
 
         for rt in region_block.get("route_tables", []):
-            rt_id = rt.get("RouteTableId")
             rts_all.append({
                 "Region": region,
-                "RouteTableId": rt_id,
+                "RouteTableId": rt.get("RouteTableId"),
                 "VpcId": rt.get("VpcId"),
                 "Associations": len(rt.get("Associations", []) or []),
                 "Routes": len(rt.get("Routes", []) or []),
             })
-
-            has_igw = False
-            for r in rt.get("Routes", []) or []:
-                if r.get("GatewayId", "").startswith("igw-") and r.get("DestinationCidrBlock") == "0.0.0.0/0":
-                    has_igw = True
-                    break
-            rt_has_igw[(region, rt_id)] = has_igw
-
-            for a in rt.get("Associations", []) or []:
-                subnet_id = a.get("SubnetId")
-                if subnet_id:
-                    route_assoc.setdefault((region, subnet_id), []).append(rt_id)
 
         for sg in region_block.get("security_groups", []):
             sgs_all.append({
@@ -190,25 +170,6 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
                 "EgressRules": len(sg.get("IpPermissionsEgress", []) or []),
                 "Description": sg.get("Description"),
             })
-
-            for perm in sg.get("IpPermissions", []) or []:
-                from_p = perm.get("FromPort")
-                to_p = perm.get("ToPort")
-                if from_p is None or to_p is None:
-                    continue
-                if _is_world_open(perm.get("IpRanges", []) or []):
-                    for p in range(int(from_p), int(to_p) + 1):
-                        if p in RISK_PORTS:
-                            security_findings.append({
-                                "Region": region,
-                                "Finding": "SecurityGroup open to world",
-                                "Severity": "HIGH",
-                                "GroupId": sg.get("GroupId"),
-                                "GroupName": sg.get("GroupName"),
-                                "Port": p,
-                                "Service": RISK_PORTS[p],
-                                "Cidr": "0.0.0.0/0",
-                            })
 
         for ins in region_block.get("instances", []):
             tags = _tags_dict(ins.get("Tags", []) or [])
@@ -226,24 +187,6 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
                 "PublicIp": ins.get("PublicIpAddress"),
             })
 
-            missing = [t for t in REQUIRED_TAGS if not tags.get(t)]
-            if missing:
-                tag_compliance.append({
-                    "Region": region,
-                    "ResourceType": "EC2",
-                    "ResourceId": ins.get("InstanceId"),
-                    "Name": name,
-                    "MissingTags": ", ".join(missing),
-                })
-
-            if ((ins.get("State") or {}).get("Name") == "stopped") and (ins.get("InstanceType") or "").startswith(("m", "c", "r")):
-                unused_resources.append({
-                    "Region": region,
-                    "Type": "EC2 (Stopped large family)",
-                    "ResourceId": ins.get("InstanceId"),
-                    "Details": f"InstanceType={ins.get('InstanceType')}",
-                })
-
         for lb in region_block.get("load_balancers", []):
             lbs_all.append({
                 "Region": region,
@@ -260,7 +203,6 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
             atts = v.get("Attachments", []) or []
             instance_id = atts[0].get("InstanceId") if atts else ""
             device = atts[0].get("Device") if atts else ""
-            tags = _tags_dict(v.get("Tags", []) or [])
 
             ebs_vols_all.append({
                 "Region": region,
@@ -275,24 +217,6 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
                 "AttachedInstanceId": instance_id,
                 "Device": device,
             })
-
-            if v.get("State") == "available" and not atts:
-                unused_resources.append({
-                    "Region": region,
-                    "Type": "EBS (Unattached)",
-                    "ResourceId": v.get("VolumeId"),
-                    "Details": f"SizeGiB={v.get('Size')} Type={v.get('VolumeType')}",
-                })
-
-            missing = [t for t in REQUIRED_TAGS if not tags.get(t)]
-            if missing:
-                tag_compliance.append({
-                    "Region": region,
-                    "ResourceType": "EBS",
-                    "ResourceId": v.get("VolumeId"),
-                    "Name": tags.get("Name", ""),
-                    "MissingTags": ", ".join(missing),
-                })
 
         for db in region_block.get("rds_db_instances", []):
             rds_instances_all.append({
@@ -310,13 +234,6 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
                 "Endpoint": (db.get("Endpoint") or {}).get("Address"),
             })
 
-            if db.get("PubliclyAccessible") is True:
-                rds_risk.append({"Region": region, "DB": db.get("DBInstanceIdentifier"), "Risk": "PubliclyAccessible = true", "Severity": "HIGH"})
-            if db.get("StorageEncrypted") is False:
-                rds_risk.append({"Region": region, "DB": db.get("DBInstanceIdentifier"), "Risk": "StorageEncrypted = false", "Severity": "MEDIUM"})
-            if (db.get("BackupRetentionPeriod") or 0) == 0:
-                rds_risk.append({"Region": region, "DB": db.get("DBInstanceIdentifier"), "Risk": "BackupRetentionPeriod = 0", "Severity": "MEDIUM"})
-
         for c in region_block.get("rds_db_clusters", []):
             rds_clusters_all.append({
                 "Region": region,
@@ -330,8 +247,6 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
             })
 
         for a in region_block.get("autoscaling_groups", []):
-            tags = _tags_dict(a.get("Tags", []) or [])
-
             asgs_all.append({
                 "Region": region,
                 "AutoScalingGroupName": a.get("AutoScalingGroupName"),
@@ -343,24 +258,6 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
                 "Instances": len(a.get("Instances", []) or []),
             })
 
-            if (a.get("DesiredCapacity") or 0) == 0:
-                unused_resources.append({
-                    "Region": region,
-                    "Type": "ASG (DesiredCapacity=0)",
-                    "ResourceId": a.get("AutoScalingGroupName"),
-                    "Details": f"Min={a.get('MinSize')} Max={a.get('MaxSize')}",
-                })
-
-            missing = [t for t in REQUIRED_TAGS if not tags.get(t)]
-            if missing:
-                tag_compliance.append({
-                    "Region": region,
-                    "ResourceType": "ASG",
-                    "ResourceId": a.get("AutoScalingGroupName"),
-                    "Name": tags.get("Name", ""),
-                    "MissingTags": ", ".join(missing),
-                })
-
         for t in region_block.get("dynamodb_tables", []):
             dynamodb_all.append({
                 "Region": region,
@@ -371,36 +268,6 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
                 "SizeBytes": t.get("TableSizeBytes"),
                 "Arn": t.get("TableArn"),
             })
-
-    for s in subnets_all:
-        region = s["Region"]
-        subnet_id = s["SubnetId"]
-        rts = route_assoc.get((region, subnet_id), []) or []
-        is_public = any(rt_has_igw.get((region, rt_id)) is True for rt_id in rts)
-
-        network_overview.append({
-            "Region": region,
-            "VpcId": s.get("VpcId"),
-            "SubnetId": subnet_id,
-            "AZ": s.get("AvailabilityZone"),
-            "CidrBlock": s.get("CidrBlock"),
-            "SubnetType": "Public" if is_public else "Private/Unknown",
-            "AssociatedRouteTables": ", ".join(rts) if rts else "",
-        })
-
-    iam_audit = [{
-        "UserName": u.get("UserName"),
-        "CreateDate": u.get("CreateDate"),
-        "PasswordLastUsed": u.get("PasswordLastUsed"),
-        "Arn": u.get("Arn"),
-    } for u in iam_users_all]
-
-    findings_summary = [{
-        "Security_Findings": len(security_findings),
-        "Tag_Compliance_Issues": len(tag_compliance),
-        "Unused_Resources": len(unused_resources),
-        "RDS_Risk_Items": len(rds_risk),
-    }]
 
     run_info_rows = [{
         "timestamp_utc": run_info.get("timestamp_utc", ""),
@@ -428,6 +295,7 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
         "IAMUsers": len(iam_users_all),
     }]
 
+    # Convert the lists of dictionaries into pandas DataFrames, sanitize the data for Excel, and write each DataFrame to a separate sheet in the Excel file
     def df(records: Any) -> pd.DataFrame:
         return pd.DataFrame(sanitize_for_excel(records))
 
@@ -449,14 +317,6 @@ def build_excel(inventory: Dict[str, Any], out_xlsx_path: str) -> None:
         df(iam_users_all).to_excel(writer, index=False, sheet_name="IAM_Users")
 
         df(run_info_rows).to_excel(writer, index=False, sheet_name="Run_Info")
-        df(findings_summary).to_excel(writer, index=False, sheet_name="Findings_Summary")
-        df(tag_compliance).to_excel(writer, index=False, sheet_name="Tag_Compliance")
-        df(security_findings).to_excel(writer, index=False, sheet_name="Security_Findings")
-        df(unused_resources).to_excel(writer, index=False, sheet_name="Unused_Resources")
-        df(rds_risk).to_excel(writer, index=False, sheet_name="RDS_Risk")
-        df(network_overview).to_excel(writer, index=False, sheet_name="Network_Overview")
-        df(iam_audit).to_excel(writer, index=False, sheet_name="IAM_Audit")
-
         df(summary).to_excel(writer, index=False, sheet_name="Summary")
 
     apply_workbook_formatting(out_xlsx_path)

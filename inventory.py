@@ -1,15 +1,11 @@
+# ---------------------------------------------------------
 # inventory.py
-"""
-AWS inventory collection.
-
-Collects:
-- Global inventory (S3 buckets, IAM users, account aliases)
-- Regional inventory (VPC/EC2/etc + EBS, RDS, ASG, DynamoDB)
-
-Errors are captured per-service and do not stop the full run.
-"""
+# AWS inventory collection for aws-audit-tool
+# ---------------------------------------------------------
 
 from __future__ import annotations
+
+# Imports -----------------------------------------------
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Callable
@@ -20,19 +16,14 @@ from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
+# Internal Helpers --------------------------------------
 
+# Creates a boto3 client for the specified service and region
 def _client(service: str, region: str):
     return boto3.client(service, region_name=region)
 
-
+# Safely calls a function and captures ClientError exceptions, returning a standardized response
 def safe_call(fn: Callable[..., Any], **kwargs) -> dict:
-    """
-    Run a boto3 call safely.
-
-    Returns:
-      {"ok": True, "data": <response>}
-      {"ok": False, "error": "...", "code": "...", "message": "..."}
-    """
     try:
         return {"ok": True, "data": fn(**kwargs)}
     except ClientError as e:
@@ -44,14 +35,13 @@ def safe_call(fn: Callable[..., Any], **kwargs) -> dict:
             "message": err.get("Message", ""),
         }
 
-
-def _paginate(client, operation: str, result_key: str, **kwargs) -> tuple[list[dict], Optional[dict]]:
-    """
-    Generic paginator helper.
-
-    Returns:
-      (items, error_obj)
-    """
+# Paginates through a boto3 client operation, collecting items from the specified result key, and captures ClientError exceptions
+def _paginate(
+    client,
+    operation: str,
+    result_key: str,
+    **kwargs
+) -> tuple[list[dict], Optional[dict]]:
     items: list[dict] = []
     try:
         paginator = client.get_paginator(operation)
@@ -66,27 +56,25 @@ def _paginate(client, operation: str, result_key: str, **kwargs) -> tuple[list[d
             "message": err.get("Message", ""),
         }
 
+# Global Inventory --------------------------------------
 
+# Collects global inventory items that are not region-specific, such as IAM users and S3 buckets, and captures ClientError exceptions
 def collect_global_inventory() -> Dict[str, Any]:
-    """Collect global (non-regional) resources."""
     s3 = boto3.client("s3")
     iam = boto3.client("iam")
 
     out: Dict[str, Any] = {}
-
-    # Account aliases
+    
     resp = safe_call(iam.list_account_aliases)
     out["account_aliases"] = resp["data"].get("AccountAliases", []) if resp["ok"] else []
     if not resp["ok"]:
         out["account_aliases_error"] = resp
 
-    # S3 buckets (global)
     resp = safe_call(s3.list_buckets)
     out["s3_buckets"] = resp["data"].get("Buckets", []) if resp["ok"] else []
     if not resp["ok"]:
         out["s3_buckets_error"] = resp
 
-    # IAM users (global, paginated)
     users, err = _paginate(iam, "list_users", "Users")
     out["iam_users"] = users
     if err:
@@ -94,9 +82,10 @@ def collect_global_inventory() -> Dict[str, Any]:
 
     return out
 
+# Regional Inventory ------------------------------------
 
+# Collects inventory items for a specific region, such as VPCs, EC2 instances, and RDS clusters, and captures ClientError exceptions for each API call
 def collect_region_inventory(region: str) -> Dict[str, Any]:
-    """Collect regional inventory for a single AWS region."""
     ec2 = _client("ec2", region)
     elbv2 = _client("elbv2", region)
     rds = _client("rds", region)
@@ -105,26 +94,8 @@ def collect_region_inventory(region: str) -> Dict[str, Any]:
 
     data: Dict[str, Any] = {"region": region}
 
-    # Core
-    for key, call in [
-        ("vpcs", lambda: safe_call(ec2.describe_vpcs)),
-        ("subnets", lambda: safe_call(ec2.describe_subnets)),
-        ("route_tables", lambda: safe_call(ec2.describe_route_tables)),
-        ("internet_gateways", lambda: safe_call(ec2.describe_internet_gateways)),
-        ("nat_gateways", lambda: safe_call(ec2.describe_nat_gateways)),
-        ("security_groups", lambda: safe_call(ec2.describe_security_groups)),
-        ("network_interfaces", lambda: safe_call(ec2.describe_network_interfaces)),
-    ]:
-        resp = call()
-        data[key] = resp["data"].get(key[0].upper() + key[1:], []) if resp["ok"] else []
-        # above line won't match AWS keys always; handle individually below for correctness
-
-    # Fix keys properly (AWS response keys)
-    data["vpcs"] = safe_call(ec2.describe_vpcs)["data"].get("Vpcs", []) if safe_call(ec2.describe_vpcs)["ok"] else []
-    # NOTE: avoid double calls by doing explicit calls once:
-    # We'll do it correctly below with single calls:
-
-    # --- Single-call blocks (no duplicates) ---
+    # Each API call is wrapped in safe_call to capture errors without stopping the entire collection process. 
+    # Results are stored in the data dictionary, and any errors are recorded with an "_error" key for that resource type.
     resp = safe_call(ec2.describe_vpcs)
     data["vpcs"] = resp["data"].get("Vpcs", []) if resp["ok"] else []
     if not resp["ok"]:
@@ -160,7 +131,6 @@ def collect_region_inventory(region: str) -> Dict[str, Any]:
     if not resp["ok"]:
         data["network_interfaces_error"] = resp
 
-    # Instances (paginated)
     instances, err = _paginate(ec2, "describe_instances", "Reservations")
     if err:
         data["instances"] = []
@@ -171,13 +141,11 @@ def collect_region_inventory(region: str) -> Dict[str, Any]:
             flat.extend(r.get("Instances", []) or [])
         data["instances"] = flat
 
-    # EBS volumes (paginated)
     vols, err = _paginate(ec2, "describe_volumes", "Volumes")
     data["ebs_volumes"] = vols
     if err:
         data["ebs_volumes_error"] = err
 
-    # Load balancers / target groups
     resp = safe_call(elbv2.describe_load_balancers)
     data["load_balancers"] = resp["data"].get("LoadBalancers", []) if resp["ok"] else []
     if not resp["ok"]:
@@ -188,7 +156,6 @@ def collect_region_inventory(region: str) -> Dict[str, Any]:
     if not resp["ok"]:
         data["target_groups_error"] = resp
 
-    # RDS
     resp = safe_call(rds.describe_db_instances)
     data["rds_db_instances"] = resp["data"].get("DBInstances", []) if resp["ok"] else []
     if not resp["ok"]:
@@ -199,13 +166,11 @@ def collect_region_inventory(region: str) -> Dict[str, Any]:
     if not resp["ok"]:
         data["rds_db_clusters_error"] = resp
 
-    # AutoScaling (paginated)
     asgs, err = _paginate(autoscaling, "describe_auto_scaling_groups", "AutoScalingGroups")
     data["autoscaling_groups"] = asgs
     if err:
         data["autoscaling_groups_error"] = err
 
-    # DynamoDB: list tables + describe each
     table_names: list[str] = []
     try:
         p = dynamodb.get_paginator("list_tables")
@@ -221,6 +186,8 @@ def collect_region_inventory(region: str) -> Dict[str, Any]:
         }
         return data
 
+    # For each DynamoDB table, we attempt to describe it to get more details. 
+    # Errors in describing individual tables are collected but do not stop the process of collecting other tables.
     tables: list[dict] = []
     errors: list[dict] = []
     for name in table_names:
@@ -236,11 +203,13 @@ def collect_region_inventory(region: str) -> Dict[str, Any]:
 
     return data
 
+# Orchestration -----------------------------------------
 
+# Collects inventory for the specified regions, including global inventory, and returns a structured dictionary with all collected data.
 def collect_inventory(regions: List[str], max_workers: int = 8) -> Dict[str, Any]:
-    """Collect inventory for all regions (parallel) + global inventory."""
     global_inv = collect_global_inventory()
 
+    # We use a ThreadPoolExecutor to collect regional inventory in parallel, which can speed up the process when there are many regions.
     items: list[dict] = []
     if not regions:
         return {"regions": [], "global": global_inv, "items": []}
@@ -253,7 +222,6 @@ def collect_inventory(regions: List[str], max_workers: int = 8) -> Dict[str, Any
         for fut in as_completed(futures):
             items.append(fut.result())
 
-    # Keep output stable-ish: sort by region
     items.sort(key=lambda x: x.get("region", ""))
 
     return {"regions": regions, "global": global_inv, "items": items}

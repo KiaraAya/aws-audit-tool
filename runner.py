@@ -1,18 +1,11 @@
-"""
-Execution orchestrator for aws-audit-tool.
-
-Flow:
-1) Validate identity (STS)
-2) Collect inventory (global + per region)
-3) Write inventory.json + sts_identity.json
-4) Generate Excel report
-5) Optional: CloudMapper (collect + prepare)
-   - Package offline site ZIP (web + account-data/<account>)
-   - Optionally start webserver
-6) Optional: Upload outputs to S3
-"""
+# ---------------------------------------------------------
+# runner.py
+# Execution orchestrator for aws-audit-tool
+# ---------------------------------------------------------
 
 from __future__ import annotations
+
+# Imports -----------------------------------------------
 
 import json
 import os
@@ -28,23 +21,26 @@ from s3_io import upload_tree, upload_file
 
 logger = logging.getLogger(__name__)
 
+# Internal Helpers --------------------------------------
 
+# Helper to ensure a directory exists
 def ensure_dirs(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
-
+# Helper to get AWS STS caller identity
 def get_identity() -> dict:
     sts = boto3.client("sts")
     return sts.get_caller_identity()
 
-
+# Helper to write JSON with indentation and handle non-serializable objects
 def _write_json(path: str, obj: object) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, default=str)
 
+# Orchestration -----------------------------------------
 
+# Main function to run the entire audit process
 def run_all(settings: Settings) -> str:
-    # Import here so runner can still run even if cloudmapper deps are missing
     from cloudmapper_job import (
         run_cloudmapper,
         package_cloudmapper_site_zip,
@@ -53,6 +49,7 @@ def run_all(settings: Settings) -> str:
 
     ensure_dirs(settings.output_dir)
 
+    # Get AWS identity and timestamp for this run
     identity = get_identity()
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -61,10 +58,9 @@ def run_all(settings: Settings) -> str:
 
     logger.info("Run started: %s", ts)
 
-    # 1) Persist STS identity
     _write_json(os.path.join(run_dir, "sts_identity.json"), identity)
 
-    # 2) Inventory
+    # Collect inventory and save it
     inv = collect_inventory(settings.regions)
     inv["run_info"] = {
         "timestamp_utc": ts,
@@ -75,11 +71,10 @@ def run_all(settings: Settings) -> str:
     }
     _write_json(os.path.join(run_dir, "inventory.json"), inv)
 
-    # 3) Excel
     excel_path = os.path.join(run_dir, "audit_report.xlsx")
     build_excel(inv, excel_path)
 
-    # 4) Findings summary
+    # Save a summary of findings for quick reference
     findings_path = os.path.join(run_dir, "findings_summary.json")
     _write_json(
         findings_path,
@@ -92,10 +87,10 @@ def run_all(settings: Settings) -> str:
         },
     )
 
-    # 5) CloudMapper (optional)
     web_proc = None
     cloudmapper_zip = None
 
+    # Optionally run CloudMapper and package its output
     if settings.run_cloudmapper:
         try:
             run_cloudmapper(
@@ -104,16 +99,13 @@ def run_all(settings: Settings) -> str:
                 regions=settings.regions,
             )
 
-            # Package offline "HTML" as ZIP (recommended way)
             cloudmapper_zip = package_cloudmapper_site_zip(
                 cloudmapper_dir=settings.cloudmapper_dir,
                 account_name=settings.account_name,
                 out_dir=run_dir,
             )
 
-            # Start webserver (optional) - your version supports --port/--public/--ipv6 only
-            # If you want it always on, set an env var in config later.
-            # For now: only start if CLOUDMAPPER_WEBSERVER=1
+            # If configured, start the CloudMapper webserver (non-blocking)
             if os.getenv("CLOUDMAPPER_WEBSERVER", "0") == "1":
                 web_proc = start_cloudmapper_webserver(
                     cloudmapper_dir=settings.cloudmapper_dir,
@@ -125,20 +117,19 @@ def run_all(settings: Settings) -> str:
         except Exception as e:
             logger.warning("CloudMapper failed (non-blocking): %s", e)
 
-    # 6) Upload outputs to S3 (optional)
+    # Upload results to S3 if configured
     if settings.s3_bucket:
         prefix = f"{settings.s3_prefix}/{ts}"
 
-        # Upload the full run_dir (Excel + JSON + zip if present)
         upload_tree(settings.s3_bucket, prefix, run_dir)
 
-        # (Optional) Make sure zip is uploaded even if your upload_tree ignores it for any reason
         if cloudmapper_zip and os.path.exists(cloudmapper_zip):
             key = f"{prefix}/{os.path.basename(cloudmapper_zip)}"
             upload_file(settings.s3_bucket, key, cloudmapper_zip)
 
     logger.info("Run completed: outputs=%s", run_dir)
 
+    # If the webserver is running, log its status
     if web_proc:
         logger.info(
             "CloudMapper webserver running (PID=%s). Use SSH tunnel to view it.",
