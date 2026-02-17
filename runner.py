@@ -92,30 +92,37 @@ def run_all(settings: Settings) -> str:
 
     # Optionally run CloudMapper and package its output
     if settings.run_cloudmapper:
+        # Try to run CloudMapper, but do not block ZIP packaging if outputs exist
         try:
             run_cloudmapper(
                 cloudmapper_dir=settings.cloudmapper_dir,
                 account_name=settings.account_name,
                 regions=settings.regions,
             )
+        except Exception as e:
+            logger.warning("CloudMapper collect/prepare failed (continuing to package if possible): %s", e)
 
+        # Always try packaging if required folders exist
+        try:
             cloudmapper_zip = package_cloudmapper_site_zip(
                 cloudmapper_dir=settings.cloudmapper_dir,
                 account_name=settings.account_name,
                 out_dir=run_dir,
             )
+        except Exception as e:
+            logger.warning("CloudMapper ZIP packaging failed: %s", e)
 
-            # If configured, start the CloudMapper webserver (non-blocking)
-            if os.getenv("CLOUDMAPPER_WEBSERVER", "0") == "1":
+        # Optional webserver
+        if os.getenv("CLOUDMAPPER_WEBSERVER", "0") == "1":
+            try:
                 web_proc = start_cloudmapper_webserver(
                     cloudmapper_dir=settings.cloudmapper_dir,
                     port=getattr(settings, "cloudmapper_port", 8000),
                     public=False,
                     ipv6=False,
                 )
-
-        except Exception as e:
-            logger.warning("CloudMapper failed (non-blocking): %s", e)
+            except Exception as e:
+                logger.warning("CloudMapper webserver failed: %s", e)
 
     # Upload results to S3 if configured
     if settings.s3_bucket:
