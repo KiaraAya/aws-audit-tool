@@ -133,42 +133,52 @@ def package_cloudmapper_site_zip(
 
     if site_root.exists():
         shutil.rmtree(site_root)
-        
-    # Create a BAT file inside the destination folder that you want to zip
-    bat_path = site_root / "Open_Cloudmapper.bat"
 
-    bat_content = r"""@echo off
-    setlocal
-
-    cd /d "%~dp0"
-
-    if not exist "web\index.html" (
-        echo ERROR: No se encontro web\index.html
-        pause
-        exit /b 1
-    )
-
-    cd /d "web"
-
-    start "" cmd /c "python -m http.server 8000"
-    timeout /t 2 >nul
-    start "" http://localhost:8000/
-
-    exit
-    """
-
-    bat_path.write_text(bat_content, encoding="utf-8")
-    
     # Create the site root directory
-    site_root.mkdir()
+    site_root.mkdir(parents=True, exist_ok=True)
 
-    shutil.copytree(web_src, site_root / "web")
+    # Copy required directories into the site root
+    shutil.copytree(web_src, site_root / "web", dirs_exist_ok=True)
 
     shutil.copytree(
         data_src,
         site_root / "account-data" / account_name,
         dirs_exist_ok=True,
     )
+
+    # Create a BAT file inside the destination folder that you want to zip
+    bat_path = site_root / "Open_Cloudmapper.bat"
+
+    bat_content = r"""@echo off
+setlocal
+
+cd /d "%~dp0"
+
+if not exist "web\index.html" (
+    echo ERROR: No se encontro web\index.html
+    pause
+    exit /b 1
+)
+
+REM Check if Python is installed
+where python >nul 2>nul
+if errorlevel 1 (
+    echo ERROR: Python no esta instalado o no esta en el PATH.
+    echo Instala Python 3 desde https://www.python.org/
+    pause
+    exit /b 1
+)
+
+cd /d "web"
+
+start "" cmd /k "python -m http.server 8000"
+timeout /t 2 >nul
+start "" http://localhost:8000/
+
+exit
+"""
+
+    bat_path.write_text(bat_content, encoding="utf-8")
 
     # Create the ZIP file
     zip_base = out_path / f"cloudmapper_{account_name}"
