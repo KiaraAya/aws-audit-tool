@@ -133,7 +133,32 @@ def package_cloudmapper_site_zip(
 
     if site_root.exists():
         shutil.rmtree(site_root)
+        
+    # Create a BAT file inside the destination folder that you want to zip
+    bat_path = site_root / "Open_Cloudmapper.bat"
 
+    bat_content = r"""@echo off
+    setlocal
+
+    cd /d "%~dp0"
+
+    if not exist "web\index.html" (
+        echo ERROR: No se encontro web\index.html
+        pause
+        exit /b 1
+    )
+
+    cd /d "web"
+
+    start "" cmd /c "python -m http.server 8000"
+    timeout /t 2 >nul
+    start "" http://localhost:8000/
+
+    exit
+    """
+
+    bat_path.write_text(bat_content, encoding="utf-8")
+    
     # Create the site root directory
     site_root.mkdir()
 
