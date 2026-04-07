@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from datetime import datetime, timezone
 import logging
 
@@ -17,7 +18,7 @@ import boto3
 from config import Settings
 from inventory import collect_inventory
 from excel_report import build_excel
-from s3_io import upload_tree, upload_file
+from s3_io import upload_tree
 
 logger = logging.getLogger(__name__)
 
@@ -130,9 +131,22 @@ def run_all(settings: Settings) -> str:
 
         upload_tree(settings.s3_bucket, prefix, run_dir)
 
-        if cloudmapper_zip and os.path.exists(cloudmapper_zip):
-            key = f"{prefix}/{os.path.basename(cloudmapper_zip)}"
-            upload_file(settings.s3_bucket, key, cloudmapper_zip)
+        logger.info("S3 upload completed: s3://%s/%s", settings.s3_bucket, prefix)
+
+        # Delete local output folder only after successful S3 upload
+        shutil.rmtree(run_dir)
+        logger.info("Local output folder deleted after S3 backup: %s", run_dir)
+
+        logger.info("Run completed: s3://%s/%s", settings.s3_bucket, prefix)
+
+        # If the webserver is running, log its status
+        if web_proc:
+            logger.info(
+                "CloudMapper webserver running (PID=%s). Use SSH tunnel to view it.",
+                web_proc.pid,
+            )
+
+        return f"s3://{settings.s3_bucket}/{prefix}"
 
     logger.info("Run completed: outputs=%s", run_dir)
 
