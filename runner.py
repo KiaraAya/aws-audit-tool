@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from datetime import datetime, timezone
 import logging
 
@@ -89,7 +88,6 @@ def run_all(settings: Settings) -> str:
     )
 
     web_proc = None
-    cloudmapper_zip = None
 
     # Optionally run CloudMapper and package its output
     if settings.run_cloudmapper:
@@ -105,7 +103,7 @@ def run_all(settings: Settings) -> str:
 
         # Always try packaging if required folders exist
         try:
-            cloudmapper_zip = package_cloudmapper_site_zip(
+            package_cloudmapper_site_zip(
                 cloudmapper_dir=settings.cloudmapper_dir,
                 account_name=settings.account_name,
                 out_dir=run_dir,
@@ -128,25 +126,8 @@ def run_all(settings: Settings) -> str:
     # Upload results to S3 if configured
     if settings.s3_bucket:
         prefix = f"{settings.s3_prefix}/{ts}"
-
         upload_tree(settings.s3_bucket, prefix, run_dir)
-
         logger.info("S3 upload completed: s3://%s/%s", settings.s3_bucket, prefix)
-
-        # Delete local output folder only after successful S3 upload
-        shutil.rmtree(run_dir)
-        logger.info("Local output folder deleted after S3 backup: %s", run_dir)
-
-        logger.info("Run completed: s3://%s/%s", settings.s3_bucket, prefix)
-
-        # If the webserver is running, log its status
-        if web_proc:
-            logger.info(
-                "CloudMapper webserver running (PID=%s). Use SSH tunnel to view it.",
-                web_proc.pid,
-            )
-
-        return f"s3://{settings.s3_bucket}/{prefix}"
 
     logger.info("Run completed: outputs=%s", run_dir)
 

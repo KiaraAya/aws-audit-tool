@@ -3,11 +3,6 @@
 # Bot configuration for connection to EC2
 # ---------------------------------------------------------
 
-# ---------------------------------------------------------
-# config.py
-# Bot configuration for connection to EC2 and S3
-# ---------------------------------------------------------
-
 AWS_PROFILE = "aws-audit-sso"
 AWS_REGION = "us-east-1"
 

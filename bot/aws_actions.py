@@ -10,6 +10,7 @@ import os
 import stat
 import time
 import glob
+import posixpath
 import paramiko
 import boto3
 
@@ -150,6 +151,27 @@ def _connect_ssh_with_keypair():
     return _connect_ssh_with_private_key(private_key_obj)
 
 
+# Opens an SSH connection using the currently configured auth mode
+def _connect_for_current_mode():
+    if AUTH_MODE == "keypair":
+        return _connect_ssh_with_keypair()
+
+    if AUTH_MODE == "sso":
+        is_valid, auth_message = validate_sso_session()
+        if not is_valid:
+            raise RuntimeError(f"SSO session is not active: {auth_message}")
+
+        private_key_str, public_key_str = _generate_temporary_ssh_keypair()
+        response = _send_ssh_public_key(public_key_str)
+
+        if not response.get("Success"):
+            raise RuntimeError(f"Failed to send SSH public key: {response}")
+
+        return _connect_ssh_with_temporary_key(private_key_str)
+
+    raise RuntimeError(f"Unsupported AUTH_MODE: {AUTH_MODE}")
+
+
 # Runs the audit script remotely on the EC2 instance
 def run_audit(regions, run_cloudmapper=True):
     ssh = None
@@ -159,28 +181,7 @@ def run_audit(regions, run_cloudmapper=True):
             return False, "Please select at least one region."
 
         command = _build_remote_command(regions, run_cloudmapper)
-
-        # Current execution mode: SSH Key Pair
-        if AUTH_MODE == "keypair":
-            ssh = _connect_ssh_with_keypair()
-
-        # Alternative documented mode: IAM Identity Center + EC2 Instance Connect
-        elif AUTH_MODE == "sso":
-            is_valid, auth_message = validate_sso_session()
-            if not is_valid:
-                return False, f"SSO session is not active: {auth_message}"
-
-            private_key_str, public_key_str = _generate_temporary_ssh_keypair()
-
-            response = _send_ssh_public_key(public_key_str)
-
-            if not response.get("Success"):
-                return False, f"Failed to send SSH public key: {response}"
-
-            ssh = _connect_ssh_with_temporary_key(private_key_str)
-
-        else:
-            return False, f"Unsupported AUTH_MODE: {AUTH_MODE}"
+        ssh = _connect_for_current_mode()
 
         stdin, stdout, stderr = ssh.exec_command(command)
 
@@ -201,77 +202,63 @@ def run_audit(regions, run_cloudmapper=True):
             ssh.close()
 
 
-# Placeholder for report download logic
+# Downloads the latest report folder directly from the EC2 outputs directory
 def download_reports(selected_folder):
+    ssh = None
+    sftp = None
+
     try:
         if not selected_folder or selected_folder == "No folder selected":
             return False, "Please select a local folder first."
 
-        if not AWS_AUDIT_S3_BUCKET:
-            return False, "S3 bucket is not configured."
+        ssh = _connect_for_current_mode()
+        sftp = ssh.open_sftp()
 
-        session = _get_boto3_session()
-        s3 = session.client("s3")
+        remote_outputs_dir = posixpath.join(REMOTE_PROJECT_DIR, "outputs")
 
-        prefix_root = AWS_AUDIT_S3_PREFIX.rstrip("/") + "/"
-
-        resp = s3.list_objects_v2(
-            Bucket=AWS_AUDIT_S3_BUCKET,
-            Prefix=prefix_root,
-            Delimiter="/",
+        # Find latest timestamped output folder in EC2
+        stdin, stdout, stderr = ssh.exec_command(
+            f'ls -1dt "{remote_outputs_dir}"/* 2>/dev/null | head -n 1'
         )
+        latest_remote_dir = stdout.read().decode().strip()
+        error_text = stderr.read().decode().strip()
 
-        prefixes = [
-            cp["Prefix"]
-            for cp in resp.get("CommonPrefixes", [])
-            if cp.get("Prefix")
-        ]
-
-        if not prefixes:
-            return False, "No report folders were found in S3."
-
-        latest_prefix = sorted(prefixes)[-1]
-
-        list_resp = s3.list_objects_v2(
-            Bucket=AWS_AUDIT_S3_BUCKET,
-            Prefix=latest_prefix,
-        )
-
-        contents = list_resp.get("Contents", [])
-        if not contents:
-            return False, "The latest S3 report folder is empty."
+        if not latest_remote_dir:
+            return False, error_text or "No output folders were found on the EC2 instance."
 
         local_target_dir = os.path.join(
             selected_folder,
-            latest_prefix.strip("/").split("/")[-1]
+            os.path.basename(latest_remote_dir)
         )
         os.makedirs(local_target_dir, exist_ok=True)
 
         downloaded_files = []
 
-        for obj in contents:
-            key = obj["Key"]
+        for entry in sftp.listdir_attr(latest_remote_dir):
+            remote_path = posixpath.join(latest_remote_dir, entry.filename)
 
-            if key.endswith("/"):
+            if stat.S_ISDIR(entry.st_mode):
                 continue
 
-            filename = os.path.basename(key)
-            if not filename:
-                continue
-
-            local_path = os.path.join(local_target_dir, filename)
-            s3.download_file(AWS_AUDIT_S3_BUCKET, key, local_path)
-            downloaded_files.append(filename)
+            local_path = os.path.join(local_target_dir, entry.filename)
+            sftp.get(remote_path, local_path)
+            downloaded_files.append(entry.filename)
 
         if not downloaded_files:
-            return False, "No downloadable files were found in the latest S3 folder."
+            return False, "The latest output folder exists, but no files were found to download."
 
         return True, (
-            f"Reports downloaded successfully from S3.\n"
-            f"S3 location: s3://{AWS_AUDIT_S3_BUCKET}/{latest_prefix}\n"
+            f"Reports downloaded successfully from EC2.\n"
+            f"Remote folder: {latest_remote_dir}\n"
             f"Local folder: {local_target_dir}\n"
             f"Files: {', '.join(downloaded_files)}"
         )
 
     except Exception as e:
         return False, str(e)
+
+    finally:
+        if sftp:
+            sftp.close()
+        if ssh:
+            ssh.close()
